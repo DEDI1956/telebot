@@ -1,0 +1,14 @@
+{
+  "name": "telegram-cloudflare-bot",
+  "version": "1.0.0",
+  "description": "Bot Telegram untuk manajemen DNS Cloudflare (wildcard, pointing, monitoring, dsb)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.61.0",
+    "dotenv": "^16.3.2",
+    "axios": "^1.6.7"
+  }
+}
