@@ -12,25 +12,12 @@ if (!TELEGRAM_TOKEN) {
 }
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-// ==== USER DATABASE ====
-const userDbFile = 'users.json';
-function saveUser(user) {
-  let users = [];
-  if (fs.existsSync(userDbFile)) {
-    users = JSON.parse(fs.readFileSync(userDbFile));
-  }
-  if (!users.find(u => u.id === user.id)) {
-    users.push(user);
-    fs.writeFileSync(userDbFile, JSON.stringify(users, null, 2));
-  }
-}
-
 // ==== Helper: tombol menu utama ====
 function getMenuKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: '➕ Tambah DNS', callback_data: 'addcf' },
+        { text: '➕ Tambah Wildcard DNS', callback_data: 'addcf' },
         { text: '📄 List DNS', callback_data: 'listcf' }
       ],
       [
@@ -42,10 +29,7 @@ function getMenuKeyboard() {
         { text: '💾 Backup DNS', callback_data: 'backup' }
       ],
       [
-        { text: '♻️ Restore DNS', callback_data: 'restore' }
-      ],
-      [
-        { text: '❓ Bantuan', callback_data: 'help' },
+        { text: '♻️ Restore DNS', callback_data: 'restore' },
         { text: '🚪 Keluar', callback_data: 'logout' }
       ]
     ]
@@ -55,15 +39,6 @@ function getMenuKeyboard() {
 // ==== ONBOARDING ====
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  // Simpan user baru ke users.json
-  saveUser({
-    id: msg.from.id,
-    username: msg.from.username,
-    first_name: msg.from.first_name,
-    last_name: msg.from.last_name,
-    date: new Date().toISOString()
-  });
-
   userSession[chatId] = { step: 'cf_account_id' };
   bot.sendMessage(
     chatId,
@@ -73,21 +48,7 @@ bot.onText(/\/start/, (msg) => {
   );
 });
 
-// ==== ADMIN: List User Bot ====
-const ADMIN_ID = 123456789; // <-- Ganti dengan Telegram user id kamu!
-bot.onText(/\/listuser/, (msg) => {
-  if (msg.from.id !== ADMIN_ID) return; // Hanya admin
-  let users = [];
-  if (fs.existsSync(userDbFile)) {
-    users = JSON.parse(fs.readFileSync(userDbFile));
-  }
-  const daftar = users.map(u =>
-    `${u.first_name || ''} @${u.username || '-'} (ID: ${u.id})`
-  ).join('\n');
-  bot.sendMessage(msg.chat.id, `Daftar user bot:\n\n${daftar}`);
-});
-
-// ==== HANDLE ONBOARDING & STEP LANJUTAN USER ====
+// ==== HANDLE ONBOARDING ====
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text && msg.text.trim();
@@ -124,16 +85,55 @@ bot.on('message', async (msg) => {
     );
     return;
   }
-  // ADDCF step: Format <type> <name> <content>
+});
+
+// ==== CALLBACK MENU UTAMA ====
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const data = query.data;
+  const session = userSession[chatId];
+
+  // Logout: hapus session
+  if (data === 'logout') {
+    delete userSession[chatId];
+    bot.sendMessage(chatId, '🚪 Kamu telah keluar dari session Cloudflare.\nKetik /start untuk mulai lagi.');
+    bot.answerCallbackQuery(query.id);
+    return;
+  }
+
+  if (!session || !session.zoneId || !session.apiToken) {
+    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
+    bot.answerCallbackQuery(query.id);
+    return;
+  }
+
+  switch (data) {
+    case 'addcf': session.step = 'addcf_ask'; bot.sendMessage(chatId, 'Kirim format: `*.domain.com 1.2.3.4`', { parse_mode: 'Markdown' }); break;
+    case 'listcf': await handleListDNS(chatId, session); break;
+    case 'delcf': session.step = 'delcf_ask'; bot.sendMessage(chatId, 'Kirim *Record ID* yang ingin dihapus:', { parse_mode: 'Markdown' }); break;
+    case 'updatecf': session.step = 'updatecf_ask'; bot.sendMessage(chatId, 'Kirim format: `record_id 5.6.7.8`', { parse_mode: 'Markdown' }); break;
+    case 'cek': session.step = 'cek_ask'; bot.sendMessage(chatId, 'Kirim wildcard, contoh: `*.domain.com`', { parse_mode: 'Markdown' }); break;
+    case 'backup': await handleBackupDNS(chatId, session); break;
+    case 'restore': session.step = 'restore_ask'; bot.sendMessage(chatId, 'Upload file backup JSON DNS untuk restore.', { parse_mode: 'Markdown' }); break;
+    case 'help': sendHelp(chatId); break;
+    default: bot.sendMessage(chatId, 'Fitur belum didukung.'); break;
+  }
+
+  bot.answerCallbackQuery(query.id);
+});
+
+// ==== HANDLING STEP LANJUTAN USER ====
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text && msg.text.trim();
+  if (text.startsWith('/')) return;
+  const session = userSession[chatId];
+  if (!session || !session.step) return;
+
+  // ADDCF step
   if (session.step === 'addcf_ask') {
-    const parts = text.split(' ');
-    if (parts.length < 3) {
-      bot.sendMessage(chatId, 'Format salah. Contoh: `A sub.domain.com 1.2.3.4` atau `CNAME www.domain.com domain.com`', { parse_mode: 'Markdown' });
-      return;
-    }
-    const [type, name, ...contentArr] = parts;
-    const content = contentArr.join(' ');
-    await handleAddDNS(chatId, session, type.toUpperCase(), name, content);
+    const [name, content] = text.split(' ');
+    await handleAddDNS(chatId, session, name, content);
     session.step = 'menu';
     bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
     return;
@@ -147,8 +147,7 @@ bot.on('message', async (msg) => {
   }
   // UPDATECF step
   if (session.step === 'updatecf_ask') {
-    const [recordId, ...newContentArr] = text.split(' ');
-    const newContent = newContentArr.join(' ');
+    const [recordId, newContent] = text.split(' ');
     await handleUpdateDNS(chatId, session, recordId, newContent);
     session.step = 'menu';
     bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
@@ -173,78 +172,16 @@ bot.on('message', async (msg) => {
   }
 });
 
-// ==== CALLBACK MENU UTAMA ====
-bot.on('callback_query', async (query) => {
-  const chatId = query.message.chat.id;
-  const data = query.data;
-  const session = userSession[chatId];
-
-  // Logout: hapus session
-  if (data === 'logout') {
-    delete userSession[chatId];
-    bot.sendMessage(chatId, '🚪 Kamu telah keluar dari session Cloudflare.\nKetik /start untuk mulai lagi.');
-    bot.answerCallbackQuery(query.id);
-    return;
-  }
-
-  if (!session || !session.zoneId || !session.apiToken) {
-    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
-    bot.answerCallbackQuery(query.id);
-    return;
-  }
-
-  switch (data) {
-    case 'addcf':
-      session.step = 'addcf_ask';
-      bot.sendMessage(
-        chatId,
-        'Kirim format:\n`<Tipe> <Nama> <Isi>`\nContoh: `A sub.domain.com 1.2.3.4` atau `CNAME www.domain.com domain.com`',
-        { parse_mode: 'Markdown' }
-      );
-      break;
-    case 'listcf':
-      await handleListDNS(chatId, session);
-      break;
-    case 'delcf':
-      session.step = 'delcf_ask';
-      bot.sendMessage(chatId, 'Kirim *Record ID* yang ingin dihapus:', { parse_mode: 'Markdown' });
-      break;
-    case 'updatecf':
-      session.step = 'updatecf_ask';
-      bot.sendMessage(chatId, 'Kirim format: `record_id new_content` (contoh: `abc123 5.6.7.8`)', { parse_mode: 'Markdown' });
-      break;
-    case 'cek':
-      session.step = 'cek_ask';
-      bot.sendMessage(chatId, 'Kirim wildcard, contoh: `*.domain.com`', { parse_mode: 'Markdown' });
-      break;
-    case 'backup':
-      await handleBackupDNS(chatId, session);
-      break;
-    case 'restore':
-      session.step = 'restore_ask';
-      bot.sendMessage(chatId, 'Upload file backup JSON DNS untuk restore.', { parse_mode: 'Markdown' });
-      break;
-    case 'help':
-      sendHelp(chatId);
-      break;
-    default:
-      bot.sendMessage(chatId, 'Fitur belum didukung.');
-      break;
-  }
-
-  bot.answerCallbackQuery(query.id);
-});
-
-// ==== FUNCTION: ADD DNS (semua tipe) ====
-async function handleAddDNS(chatId, session, type, name, content) {
+// ==== FUNCTION: ADD DNS ====
+async function handleAddDNS(chatId, session, name, content) {
   try {
     const resp = await axios.post(
       `https://api.cloudflare.com/client/v4/zones/${session.zoneId}/dns_records`,
       {
-        type,
+        type: 'A',
         name,
         content,
-        proxied: (type === 'A' || type === 'AAAA') ? false : undefined,
+        proxied: false,
       },
       {
         headers: {
@@ -254,7 +191,7 @@ async function handleAddDNS(chatId, session, type, name, content) {
       }
     );
     if (resp.data.success) {
-      bot.sendMessage(chatId, `✅ DNS record berhasil ditambah:\n\`${type} ${name} ➡️ ${content}\``, { parse_mode: 'Markdown' });
+      bot.sendMessage(chatId, `✅ DNS wildcard berhasil ditambah:\n\`${name} ➡️ ${content}\``, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `❌ Gagal: ${JSON.stringify(resp.data.errors)}`);
     }
@@ -337,7 +274,7 @@ async function handleUpdateDNS(chatId, session, recordId, newContent) {
       }
     );
     if (resp.data.success) {
-      bot.sendMessage(chatId, `✅ Berhasil update record:\n\`${oldRecord.type} ${oldRecord.name} ➡️ ${newContent}\``, { parse_mode: 'Markdown' });
+      bot.sendMessage(chatId, `✅ Berhasil update record:\n\`${oldRecord.name} ➡️ ${newContent}\``, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `❌ Gagal update: ${JSON.stringify(resp.data.errors)}`);
     }
@@ -430,7 +367,7 @@ function sendHelp(chatId) {
   bot.sendMessage(
     chatId,
     `*Fitur Bot Cloudflare:*\n\n` +
-      '• Tambah/kelola DNS record (A, AAAA, CNAME, TXT, MX, dsb)\n' +
+      '• Tambah wildcard DNS\n' +
       '• List semua DNS record\n' +
       '• Hapus/Update DNS record\n' +
       '• Cek wildcard subdomain\n' +
