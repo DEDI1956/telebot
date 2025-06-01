@@ -3,7 +3,6 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const dns = require('dns').promises;
 const fs = require('fs');
-const ping = require('ping');
 
 const userSession = {};
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -43,8 +42,7 @@ function getMenuKeyboard() {
         { text: '💾 Backup DNS', callback_data: 'backup' }
       ],
       [
-        { text: '♻️ Restore DNS', callback_data: 'restore' },
-        { text: '📶 Ping Domain', callback_data: 'ping' }
+        { text: '♻️ Restore DNS', callback_data: 'restore' }
       ],
       [
         { text: '❓ Bantuan', callback_data: 'help' },
@@ -173,13 +171,6 @@ bot.on('message', async (msg) => {
     bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
     return;
   }
-  // PING step
-  if (session.step === 'ping_ask') {
-    await handlePingDomain(chatId, text);
-    session.step = 'menu';
-    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
-    return;
-  }
 });
 
 // ==== CALLBACK MENU UTAMA ====
@@ -232,10 +223,6 @@ bot.on('callback_query', async (query) => {
     case 'restore':
       session.step = 'restore_ask';
       bot.sendMessage(chatId, 'Upload file backup JSON DNS untuk restore.', { parse_mode: 'Markdown' });
-      break;
-    case 'ping':
-      session.step = 'ping_ask';
-      bot.sendMessage(chatId, 'Ketik domain/subdomain yang akan di-ping, contoh: `google.com`', { parse_mode: 'Markdown' });
       break;
     case 'help':
       sendHelp(chatId);
@@ -438,25 +425,6 @@ async function handleRestoreDNS(chatId, session, fileUrl) {
   }
 }
 
-// ==== FUNCTION: PING DOMAIN ====
-async function handlePingDomain(chatId, domain) {
-  bot.sendMessage(chatId, `🚦 Proses ping ke: ${domain} ...`);
-  try {
-    const result = await ping.promise.probe(domain, { timeout: 5 });
-    if (result.alive) {
-      bot.sendMessage(
-        chatId,
-        `✅ *PING BERHASIL:*\nHost: ${result.host}\nIP: ${result.numeric_host || '-'}\nWaktu: ${result.time} ms\nTTL: ${result.ttl || '-'}`,
-        { parse_mode: 'Markdown' }
-      );
-    } else {
-      bot.sendMessage(chatId, `❌ *Ping GAGAL ke ${domain}*`, { parse_mode: 'Markdown' });
-    }
-  } catch (e) {
-    bot.sendMessage(chatId, `❌ Error ping: ${e.message}`);
-  }
-}
-
 // ==== HELP MENU ====
 function sendHelp(chatId) {
   bot.sendMessage(
@@ -467,7 +435,6 @@ function sendHelp(chatId) {
       '• Hapus/Update DNS record\n' +
       '• Cek wildcard subdomain\n' +
       '• Backup & Restore DNS ke file\n' +
-      '• Cek status ping domain/subdomain\n' +
       '• Keluar session\n\n' +
       'Gunakan tombol menu di bawah pesan, atau ketik /start untuk setup ulang.',
     {
