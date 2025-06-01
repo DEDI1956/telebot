@@ -3,6 +3,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const dns = require('dns').promises;
 const fs = require('fs');
+const ping = require('ping');
 
 const userSession = {};
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -12,12 +13,25 @@ if (!TELEGRAM_TOKEN) {
 }
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
+// ==== USER DATABASE ====
+const userDbFile = 'users.json';
+function saveUser(user) {
+  let users = [];
+  if (fs.existsSync(userDbFile)) {
+    users = JSON.parse(fs.readFileSync(userDbFile));
+  }
+  if (!users.find(u => u.id === user.id)) {
+    users.push(user);
+    fs.writeFileSync(userDbFile, JSON.stringify(users, null, 2));
+  }
+}
+
 // ==== Helper: tombol menu utama ====
 function getMenuKeyboard() {
   return {
     inline_keyboard: [
       [
-        { text: '➕ Tambah Wildcard DNS', callback_data: 'addcf' },
+        { text: '➕ Tambah DNS', callback_data: 'addcf' },
         { text: '📄 List DNS', callback_data: 'listcf' }
       ],
       [
@@ -30,6 +44,10 @@ function getMenuKeyboard() {
       ],
       [
         { text: '♻️ Restore DNS', callback_data: 'restore' },
+        { text: '📶 Ping Domain', callback_data: 'ping' }
+      ],
+      [
+        { text: '❓ Bantuan', callback_data: 'help' },
         { text: '🚪 Keluar', callback_data: 'logout' }
       ]
     ]
@@ -39,6 +57,15 @@ function getMenuKeyboard() {
 // ==== ONBOARDING ====
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
+  // Simpan user baru ke users.json
+  saveUser({
+    id: msg.from.id,
+    username: msg.from.username,
+    first_name: msg.from.first_name,
+    last_name: msg.from.last_name,
+    date: new Date().toISOString()
+  });
+
   userSession[chatId] = { step: 'cf_account_id' };
   bot.sendMessage(
     chatId,
@@ -48,7 +75,21 @@ bot.onText(/\/start/, (msg) => {
   );
 });
 
-// ==== HANDLE ONBOARDING ====
+// ==== ADMIN: List User Bot ====
+const ADMIN_ID = 123456789; // <-- Ganti dengan Telegram user id kamu!
+bot.onText(/\/listuser/, (msg) => {
+  if (msg.from.id !== ADMIN_ID) return; // Hanya admin
+  let users = [];
+  if (fs.existsSync(userDbFile)) {
+    users = JSON.parse(fs.readFileSync(userDbFile));
+  }
+  const daftar = users.map(u =>
+    `${u.first_name || ''} @${u.username || '-'} (ID: ${u.id})`
+  ).join('\n');
+  bot.sendMessage(msg.chat.id, `Daftar user bot:\n\n${daftar}`);
+});
+
+// ==== HANDLE ONBOARDING & STEP LANJUTAN USER ====
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text && msg.text.trim();
@@ -85,6 +126,60 @@ bot.on('message', async (msg) => {
     );
     return;
   }
+  // ADDCF step: Format <type> <name> <content>
+  if (session.step === 'addcf_ask') {
+    const parts = text.split(' ');
+    if (parts.length < 3) {
+      bot.sendMessage(chatId, 'Format salah. Contoh: `A sub.domain.com 1.2.3.4` atau `CNAME www.domain.com domain.com`', { parse_mode: 'Markdown' });
+      return;
+    }
+    const [type, name, ...contentArr] = parts;
+    const content = contentArr.join(' ');
+    await handleAddDNS(chatId, session, type.toUpperCase(), name, content);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
+    return;
+  }
+  // DELCF step
+  if (session.step === 'delcf_ask') {
+    await handleDelDNS(chatId, session, text);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
+    return;
+  }
+  // UPDATECF step
+  if (session.step === 'updatecf_ask') {
+    const [recordId, ...newContentArr] = text.split(' ');
+    const newContent = newContentArr.join(' ');
+    await handleUpdateDNS(chatId, session, recordId, newContent);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
+    return;
+  }
+  // CEK step
+  if (session.step === 'cek_ask') {
+    const domainPattern = text.replace(/^\*\./, '');
+    await handleCekWildcard(chatId, domainPattern);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
+    return;
+  }
+  // RESTORE step (file upload)
+  if (session.step === 'restore_ask' && msg.document) {
+    const fileId = msg.document.file_id;
+    const fileLink = await bot.getFileLink(fileId);
+    await handleRestoreDNS(chatId, session, fileLink);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
+    return;
+  }
+  // PING step
+  if (session.step === 'ping_ask') {
+    await handlePingDomain(chatId, text);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
+    return;
+  }
 });
 
 // ==== CALLBACK MENU UTAMA ====
@@ -108,80 +203,61 @@ bot.on('callback_query', async (query) => {
   }
 
   switch (data) {
-    case 'addcf': session.step = 'addcf_ask'; bot.sendMessage(chatId, 'Kirim format: `*.domain.com 1.2.3.4`', { parse_mode: 'Markdown' }); break;
-    case 'listcf': await handleListDNS(chatId, session); break;
-    case 'delcf': session.step = 'delcf_ask'; bot.sendMessage(chatId, 'Kirim *Record ID* yang ingin dihapus:', { parse_mode: 'Markdown' }); break;
-    case 'updatecf': session.step = 'updatecf_ask'; bot.sendMessage(chatId, 'Kirim format: `record_id 5.6.7.8`', { parse_mode: 'Markdown' }); break;
-    case 'cek': session.step = 'cek_ask'; bot.sendMessage(chatId, 'Kirim wildcard, contoh: `*.domain.com`', { parse_mode: 'Markdown' }); break;
-    case 'backup': await handleBackupDNS(chatId, session); break;
-    case 'restore': session.step = 'restore_ask'; bot.sendMessage(chatId, 'Upload file backup JSON DNS untuk restore.', { parse_mode: 'Markdown' }); break;
-    case 'help': sendHelp(chatId); break;
-    default: bot.sendMessage(chatId, 'Fitur belum didukung.'); break;
+    case 'addcf':
+      session.step = 'addcf_ask';
+      bot.sendMessage(
+        chatId,
+        'Kirim format:\n`<Tipe> <Nama> <Isi>`\nContoh: `A sub.domain.com 1.2.3.4` atau `CNAME www.domain.com domain.com`',
+        { parse_mode: 'Markdown' }
+      );
+      break;
+    case 'listcf':
+      await handleListDNS(chatId, session);
+      break;
+    case 'delcf':
+      session.step = 'delcf_ask';
+      bot.sendMessage(chatId, 'Kirim *Record ID* yang ingin dihapus:', { parse_mode: 'Markdown' });
+      break;
+    case 'updatecf':
+      session.step = 'updatecf_ask';
+      bot.sendMessage(chatId, 'Kirim format: `record_id new_content` (contoh: `abc123 5.6.7.8`)', { parse_mode: 'Markdown' });
+      break;
+    case 'cek':
+      session.step = 'cek_ask';
+      bot.sendMessage(chatId, 'Kirim wildcard, contoh: `*.domain.com`', { parse_mode: 'Markdown' });
+      break;
+    case 'backup':
+      await handleBackupDNS(chatId, session);
+      break;
+    case 'restore':
+      session.step = 'restore_ask';
+      bot.sendMessage(chatId, 'Upload file backup JSON DNS untuk restore.', { parse_mode: 'Markdown' });
+      break;
+    case 'ping':
+      session.step = 'ping_ask';
+      bot.sendMessage(chatId, 'Ketik domain/subdomain yang akan di-ping, contoh: `google.com`', { parse_mode: 'Markdown' });
+      break;
+    case 'help':
+      sendHelp(chatId);
+      break;
+    default:
+      bot.sendMessage(chatId, 'Fitur belum didukung.');
+      break;
   }
 
   bot.answerCallbackQuery(query.id);
 });
 
-// ==== HANDLING STEP LANJUTAN USER ====
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text && msg.text.trim();
-  if (text.startsWith('/')) return;
-  const session = userSession[chatId];
-  if (!session || !session.step) return;
-
-  // ADDCF step
-  if (session.step === 'addcf_ask') {
-    const [name, content] = text.split(' ');
-    await handleAddDNS(chatId, session, name, content);
-    session.step = 'menu';
-    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
-    return;
-  }
-  // DELCF step
-  if (session.step === 'delcf_ask') {
-    await handleDelDNS(chatId, session, text);
-    session.step = 'menu';
-    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
-    return;
-  }
-  // UPDATECF step
-  if (session.step === 'updatecf_ask') {
-    const [recordId, newContent] = text.split(' ');
-    await handleUpdateDNS(chatId, session, recordId, newContent);
-    session.step = 'menu';
-    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
-    return;
-  }
-  // CEK step
-  if (session.step === 'cek_ask') {
-    const domainPattern = text.replace(/^\*\./, '');
-    await handleCekWildcard(chatId, domainPattern);
-    session.step = 'menu';
-    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
-    return;
-  }
-  // RESTORE step (file upload)
-  if (session.step === 'restore_ask' && msg.document) {
-    const fileId = msg.document.file_id;
-    const fileLink = await bot.getFileLink(fileId);
-    await handleRestoreDNS(chatId, session, fileLink);
-    session.step = 'menu';
-    bot.sendMessage(chatId, 'Kembali ke menu:', { reply_markup: getMenuKeyboard() });
-    return;
-  }
-});
-
-// ==== FUNCTION: ADD DNS ====
-async function handleAddDNS(chatId, session, name, content) {
+// ==== FUNCTION: ADD DNS (semua tipe) ====
+async function handleAddDNS(chatId, session, type, name, content) {
   try {
     const resp = await axios.post(
       `https://api.cloudflare.com/client/v4/zones/${session.zoneId}/dns_records`,
       {
-        type: 'A',
+        type,
         name,
         content,
-        proxied: false,
+        proxied: (type === 'A' || type === 'AAAA') ? false : undefined,
       },
       {
         headers: {
@@ -191,7 +267,7 @@ async function handleAddDNS(chatId, session, name, content) {
       }
     );
     if (resp.data.success) {
-      bot.sendMessage(chatId, `✅ DNS wildcard berhasil ditambah:\n\`${name} ➡️ ${content}\``, { parse_mode: 'Markdown' });
+      bot.sendMessage(chatId, `✅ DNS record berhasil ditambah:\n\`${type} ${name} ➡️ ${content}\``, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `❌ Gagal: ${JSON.stringify(resp.data.errors)}`);
     }
@@ -274,7 +350,7 @@ async function handleUpdateDNS(chatId, session, recordId, newContent) {
       }
     );
     if (resp.data.success) {
-      bot.sendMessage(chatId, `✅ Berhasil update record:\n\`${oldRecord.name} ➡️ ${newContent}\``, { parse_mode: 'Markdown' });
+      bot.sendMessage(chatId, `✅ Berhasil update record:\n\`${oldRecord.type} ${oldRecord.name} ➡️ ${newContent}\``, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `❌ Gagal update: ${JSON.stringify(resp.data.errors)}`);
     }
@@ -362,16 +438,36 @@ async function handleRestoreDNS(chatId, session, fileUrl) {
   }
 }
 
+// ==== FUNCTION: PING DOMAIN ====
+async function handlePingDomain(chatId, domain) {
+  bot.sendMessage(chatId, `🚦 Proses ping ke: ${domain} ...`);
+  try {
+    const result = await ping.promise.probe(domain, { timeout: 5 });
+    if (result.alive) {
+      bot.sendMessage(
+        chatId,
+        `✅ *PING BERHASIL:*\nHost: ${result.host}\nIP: ${result.numeric_host || '-'}\nWaktu: ${result.time} ms\nTTL: ${result.ttl || '-'}`,
+        { parse_mode: 'Markdown' }
+      );
+    } else {
+      bot.sendMessage(chatId, `❌ *Ping GAGAL ke ${domain}*`, { parse_mode: 'Markdown' });
+    }
+  } catch (e) {
+    bot.sendMessage(chatId, `❌ Error ping: ${e.message}`);
+  }
+}
+
 // ==== HELP MENU ====
 function sendHelp(chatId) {
   bot.sendMessage(
     chatId,
     `*Fitur Bot Cloudflare:*\n\n` +
-      '• Tambah wildcard DNS\n' +
+      '• Tambah/kelola DNS record (A, AAAA, CNAME, TXT, MX, dsb)\n' +
       '• List semua DNS record\n' +
       '• Hapus/Update DNS record\n' +
       '• Cek wildcard subdomain\n' +
       '• Backup & Restore DNS ke file\n' +
+      '• Cek status ping domain/subdomain\n' +
       '• Keluar session\n\n' +
       'Gunakan tombol menu di bawah pesan, atau ketik /start untuk setup ulang.',
     {
