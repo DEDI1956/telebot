@@ -12,6 +12,19 @@ if (!TELEGRAM_TOKEN) {
 }
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
+// === Tambahan: USER DATABASE ===
+const userDbFile = 'users.json';
+function saveUser(user) {
+  let users = [];
+  if (fs.existsSync(userDbFile)) {
+    users = JSON.parse(fs.readFileSync(userDbFile));
+  }
+  if (!users.find(u => u.id === user.id)) {
+    users.push(user);
+    fs.writeFileSync(userDbFile, JSON.stringify(users, null, 2));
+  }
+}
+
 // ==== Helper: tombol menu utama ====
 function getMenuKeyboard() {
   return {
@@ -39,6 +52,15 @@ function getMenuKeyboard() {
 // ==== ONBOARDING ====
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
+  // === Tambahan: simpan user ke users.json ===
+  saveUser({
+    id: msg.from.id,
+    username: msg.from.username,
+    first_name: msg.from.first_name,
+    last_name: msg.from.last_name,
+    date: new Date().toISOString()
+  });
+
   userSession[chatId] = { step: 'cf_account_id' };
   bot.sendMessage(
     chatId,
@@ -46,6 +68,24 @@ bot.onText(/\/start/, (msg) => {
       `Untuk mulai, silakan masukkan *Cloudflare Account ID* kamu.`,
     { parse_mode: 'Markdown' }
   );
+});
+
+// ==== ADMIN: List User Bot ====
+const ADMIN_ID = 7857630943; // <-- GANTI dengan user id Telegram kamu!
+bot.onText(/\/listuser/, (msg) => {
+  if (msg.from.id !== ADMIN_ID) return; // hanya admin
+  let users = [];
+  if (fs.existsSync(userDbFile)) {
+    users = JSON.parse(fs.readFileSync(userDbFile));
+  }
+  if (users.length === 0) {
+    bot.sendMessage(msg.chat.id, 'Belum ada user yang pernah menggunakan bot.');
+    return;
+  }
+  const daftar = users
+    .map(u => `${u.first_name || ''} @${u.username || '-'} (ID: ${u.id})`)
+    .join('\n');
+  bot.sendMessage(msg.chat.id, `Daftar user bot:\n\n${daftar}`);
 });
 
 // ==== HANDLE ONBOARDING ====
