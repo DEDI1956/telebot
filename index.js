@@ -1,17 +1,37 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const dns = require('dns').promises;
 
-// ===== In-memory session per user (reset jika bot restart) =====
+// ===== Simple session per user (reset jika bot restart) =====
 const userSession = {};
 
-// ===== INIT TELEGRAM BOT =====
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
   console.error('TELEGRAM_TOKEN belum di-set di .env');
   process.exit(1);
 }
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+
+// ====== Fungsi Helper ======
+function getMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '➕ Tambah Wildcard DNS', callback_data: 'addcf' },
+        { text: '📄 List DNS', callback_data: 'listcf' }
+      ],
+      [
+        { text: '✏️ Update DNS', callback_data: 'updatecf' },
+        { text: '🗑 Hapus DNS', callback_data: 'delcf' }
+      ],
+      [
+        { text: '🔎 Cek Wildcard', callback_data: 'cek' },
+        { text: '❓ Bantuan', callback_data: 'help' }
+      ]
+    ]
+  };
+}
 
 // ====== ONBOARDING ======
 bot.onText(/\/start/, (msg) => {
@@ -30,7 +50,7 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text && msg.text.trim();
 
-  // Lewati jika command (sudah di-handle onText lain)
+  // Lewati jika command
   if (text.startsWith('/')) return;
 
   const session = userSession[chatId];
@@ -57,30 +77,122 @@ bot.on('message', async (msg) => {
     session.step = 'menu';
     bot.sendMessage(
       chatId,
-      `✅ Cloudflare terhubung!\n\nPilih menu:\n` +
-        `/addcf *.domain.com 1.2.3.4 - Tambah wildcard DNS\n` +
-        `/listcf - Lihat record DNS\n` +
-        `/delcf record_id - Hapus record DNS\n` +
-        `/updatecf record_id 5.6.7.8 - Update record DNS\n` +
-        `/cek *.domain.com - Cek wildcard subdomain\n` +
-        `/help - Bantuan`,
-      { parse_mode: 'Markdown' }
+      `✅ Cloudflare terhubung!\n\nSilakan pilih fitur di bawah ini:`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: getMenuKeyboard()
+      }
     );
     return;
   }
 });
 
-// ====== ADD WILDCARD DNS RECORD ======
-bot.onText(/\/addcf (.+) (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
+// ====== MENU PILIHAN (INLINE KEYBOARD) ======
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const data = query.data;
   const session = userSession[chatId];
+
   if (!session || !session.zoneId || !session.apiToken) {
     bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
     return;
   }
-  const name = match[1]; // *.namadomain.com
-  const content = match[2]; // IP address
 
+  // Set state agar user tahu step selanjutnya
+  if (data === 'addcf') {
+    session.step = 'addcf_ask';
+    bot.sendMessage(chatId, 'Kirim format:\n`*.domain.com 1.2.3.4`', { parse_mode: 'Markdown' });
+  }
+  if (data === 'listcf') {
+    await handleListDNS(chatId, session);
+  }
+  if (data === 'delcf') {
+    session.step = 'delcf_ask';
+    bot.sendMessage(chatId, 'Kirim *Record ID* yang ingin dihapus (lihat di /listcf):', { parse_mode: 'Markdown' });
+  }
+  if (data === 'updatecf') {
+    session.step = 'updatecf_ask';
+    bot.sendMessage(chatId, 'Kirim format:\n`record_id 5.6.7.8`', { parse_mode: 'Markdown' });
+  }
+  if (data === 'cek') {
+    session.step = 'cek_ask';
+    bot.sendMessage(chatId, 'Kirim format wildcard, contoh:\n`*.domain.com`', { parse_mode: 'Markdown' });
+  }
+  if (data === 'help') {
+    sendHelp(chatId);
+  }
+
+  bot.answerCallbackQuery(query.id);
+});
+
+// ====== HANDLING STEP MENU (INPUT LANJUTAN USER) ======
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text && msg.text.trim();
+
+  // Jangan override onboarding
+  if (text.startsWith('/')) return;
+
+  const session = userSession[chatId];
+  if (!session || !session.step) return;
+
+  // ADDCF step
+  if (session.step === 'addcf_ask') {
+    const parts = text.split(' ');
+    if (parts.length !== 2) {
+      bot.sendMessage(chatId, 'Format salah. Contoh: `*.domain.com 1.2.3.4`', { parse_mode: 'Markdown' });
+      return;
+    }
+    const [name, content] = parts;
+    await handleAddDNS(chatId, session, name, content);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu utama:', {
+      reply_markup: getMenuKeyboard()
+    });
+    return;
+  }
+
+  // DELCF step
+  if (session.step === 'delcf_ask') {
+    const recordId = text;
+    await handleDelDNS(chatId, session, recordId);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu utama:', {
+      reply_markup: getMenuKeyboard()
+    });
+    return;
+  }
+
+  // UPDATECF step
+  if (session.step === 'updatecf_ask') {
+    const parts = text.split(' ');
+    if (parts.length !== 2) {
+      bot.sendMessage(chatId, 'Format salah. Contoh: `record_id 5.6.7.8`', { parse_mode: 'Markdown' });
+      return;
+    }
+    const [recordId, newContent] = parts;
+    await handleUpdateDNS(chatId, session, recordId, newContent);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu utama:', {
+      reply_markup: getMenuKeyboard()
+    });
+    return;
+  }
+
+  // CEK step
+  if (session.step === 'cek_ask') {
+    const domainPattern = text.replace(/^\*\./, '');
+    await handleCekWildcard(chatId, domainPattern);
+    session.step = 'menu';
+    bot.sendMessage(chatId, 'Kembali ke menu utama:', {
+      reply_markup: getMenuKeyboard()
+    });
+    return;
+  }
+});
+
+// ====== FUNCTION: ADD DNS ======
+async function handleAddDNS(chatId, session, name, content) {
   try {
     const resp = await axios.post(
       `https://api.cloudflare.com/client/v4/zones/${session.zoneId}/dns_records`,
@@ -98,26 +210,17 @@ bot.onText(/\/addcf (.+) (.+)/, async (msg, match) => {
       }
     );
     if (resp.data.success) {
-      bot.sendMessage(chatId, `✅ Berhasil menambah wildcard DNS:\n${name} ➡️ ${content}`);
+      bot.sendMessage(chatId, `✅ DNS wildcard berhasil ditambah:\n\`${name} ➡️ ${content}\``, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `❌ Gagal: ${JSON.stringify(resp.data.errors)}`);
     }
   } catch (e) {
-    bot.sendMessage(
-      chatId,
-      `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`
-    );
+    bot.sendMessage(chatId, `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`);
   }
-});
+}
 
-// ====== LIST DNS RECORDS ======
-bot.onText(/\/listcf/, async (msg) => {
-  const chatId = msg.chat.id;
-  const session = userSession[chatId];
-  if (!session || !session.zoneId || !session.apiToken) {
-    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
-    return;
-  }
+// ====== FUNCTION: LIST DNS ======
+async function handleListDNS(chatId, session) {
   try {
     const resp = await axios.get(
       `https://api.cloudflare.com/client/v4/zones/${session.zoneId}/dns_records?per_page=100`,
@@ -134,26 +237,16 @@ bot.onText(/\/listcf/, async (msg) => {
     }
     let reply = '*Daftar DNS record:*\n\n';
     data.forEach((r) => {
-      reply += `• [${r.type}] ${r.name} ➡️ ${r.content}\n    ID: \`${r.id}\`\n`;
+      reply += `• [${r.type}] ${r.name} ➡️ ${r.content}\n  ID: \`${r.id}\`\n`;
     });
     bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
   } catch (e) {
-    bot.sendMessage(
-      chatId,
-      `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`
-    );
+    bot.sendMessage(chatId, `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`);
   }
-});
+}
 
-// ====== DELETE DNS RECORD ======
-bot.onText(/\/delcf (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const recordId = match[1].trim();
-  const session = userSession[chatId];
-  if (!session || !session.zoneId || !session.apiToken) {
-    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
-    return;
-  }
+// ====== FUNCTION: DELETE DNS ======
+async function handleDelDNS(chatId, session, recordId) {
   try {
     const resp = await axios.delete(
       `https://api.cloudflare.com/client/v4/zones/${session.zoneId}/dns_records/${recordId}`,
@@ -169,26 +262,14 @@ bot.onText(/\/delcf (.+)/, async (msg, match) => {
       bot.sendMessage(chatId, `❌ Gagal hapus: ${JSON.stringify(resp.data.errors)}`);
     }
   } catch (e) {
-    bot.sendMessage(
-      chatId,
-      `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`
-    );
+    bot.sendMessage(chatId, `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`);
   }
-});
+}
 
-// ====== UPDATE DNS RECORD ======
-bot.onText(/\/updatecf (.+) (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const recordId = match[1].trim();
-  const newContent = match[2].trim();
-  const session = userSession[chatId];
-  if (!session || !session.zoneId || !session.apiToken) {
-    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
-    return;
-  }
-
+// ====== FUNCTION: UPDATE DNS ======
+async function handleUpdateDNS(chatId, session, recordId, newContent) {
   try {
-    // Ambil data lama record untuk type/name/ttl/proxied
+    // Get old record data
     const getResp = await axios.get(
       `https://api.cloudflare.com/client/v4/zones/${session.zoneId}/dns_records/${recordId}`,
       { headers: { Authorization: `Bearer ${session.apiToken}` } }
@@ -212,23 +293,17 @@ bot.onText(/\/updatecf (.+) (.+)/, async (msg, match) => {
       }
     );
     if (resp.data.success) {
-      bot.sendMessage(chatId, `✅ Berhasil update record:\n${oldRecord.name} ➡️ ${newContent}`);
+      bot.sendMessage(chatId, `✅ Berhasil update record:\n\`${oldRecord.name} ➡️ ${newContent}\``, { parse_mode: 'Markdown' });
     } else {
       bot.sendMessage(chatId, `❌ Gagal update: ${JSON.stringify(resp.data.errors)}`);
     }
   } catch (e) {
-    bot.sendMessage(
-      chatId,
-      `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`
-    );
+    bot.sendMessage(chatId, `❌ Error: ${e.response?.data?.errors?.[0]?.message || e.message}`);
   }
-});
+}
 
-// ====== CEK WILDCARD SUBDOMAIN (RESOLVE DNS BEBERAPA SUBDOMAIN) ======
-const dns = require('dns').promises;
-bot.onText(/\/cek \*\.?([^\s]+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const domainPattern = match[1].trim();
+// ====== FUNCTION: CEK WILDCARD ======
+async function handleCekWildcard(chatId, domainPattern) {
   const subdomains = ['www', 'api', 'blog', 'mail', 'dev', 'app', 'test', 'cdn'];
   let resultMsg = `🔍 *Hasil cek wildcard*: *.*.${domainPattern}*\n\n`;
 
@@ -238,25 +313,84 @@ bot.onText(/\/cek \*\.?([^\s]+)/, async (msg, match) => {
       const addrs = await dns.resolve(fqdn);
       resultMsg += `✅ ${fqdn} -> ${addrs.join(', ')}\n`;
     } catch (e) {
-      resultMsg += `❌ ${fqdn} TIDAK ditemukan/resolve\n`;
+      resultMsg += `❌ ${fqdn} tidak resolve\n`;
     }
   }
   bot.sendMessage(chatId, resultMsg, { parse_mode: 'Markdown' });
-});
+}
 
-// ====== HELP ======
-bot.onText(/\/help/, (msg) => {
+// ====== HELP MENU ======
+function sendHelp(chatId) {
   bot.sendMessage(
-    msg.chat.id,
-    `*Fitur Bot Cloudflare:*\n\n` +
-      `/start - Setup Cloudflare\n` +
-      `/addcf *.domain.com 1.2.3.4 - Tambah wildcard DNS\n` +
-      `/listcf - List record DNS\n` +
-      `/delcf record_id - Hapus record DNS\n` +
-      `/updatecf record_id 5.6.7.8 - Update record DNS\n` +
-      `/cek *.domain.com - Cek beberapa subdomain wildcard\n`,
-    { parse_mode: 'Markdown' }
+    chatId,
+    `*Panduan Bot Cloudflare:*\n\n` +
+      '• *Tambah Wildcard DNS*: Daftarkan wildcard DNS baru.\n' +
+      '• *List DNS*: Lihat semua record DNS di zona kamu.\n' +
+      '• *Update DNS*: Update IP/pointing suatu record DNS.\n' +
+      '• *Hapus DNS*: Hapus DNS record (pakai ID dari List DNS).\n' +
+      '• *Cek Wildcard*: Cek resolve subdomain wildcard ke IP.\n\n' +
+      'Gunakan tombol menu di bawah pesan, atau ketik /start untuk setup ulang.\n\n' +
+      'Format manual:\n' +
+      '`/addcf *.domain.com 1.2.3.4`\n' +
+      '`/delcf record_id`\n' +
+      '`/updatecf record_id 5.6.7.8`\n' +
+      '`/cek *.domain.com`\n',
+    {
+      parse_mode: 'Markdown',
+      reply_markup: getMenuKeyboard()
+    }
   );
+}
+
+// ====== MANUAL COMMANDS (tetap bisa digunakan) ======
+bot.onText(/\/addcf (.+) (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const session = userSession[chatId];
+  if (!session || !session.zoneId || !session.apiToken) {
+    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
+    return;
+  }
+  const name = match[1];
+  const content = match[2];
+  await handleAddDNS(chatId, session, name, content);
+});
+bot.onText(/\/listcf/, async (msg) => {
+  const chatId = msg.chat.id;
+  const session = userSession[chatId];
+  if (!session || !session.zoneId || !session.apiToken) {
+    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
+    return;
+  }
+  await handleListDNS(chatId, session);
+});
+bot.onText(/\/delcf (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const recordId = match[1].trim();
+  const session = userSession[chatId];
+  if (!session || !session.zoneId || !session.apiToken) {
+    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
+    return;
+  }
+  await handleDelDNS(chatId, session, recordId);
+});
+bot.onText(/\/updatecf (.+) (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const recordId = match[1].trim();
+  const newContent = match[2].trim();
+  const session = userSession[chatId];
+  if (!session || !session.zoneId || !session.apiToken) {
+    bot.sendMessage(chatId, '⚠️ Silakan lakukan setup Cloudflare dulu dengan /start');
+    return;
+  }
+  await handleUpdateDNS(chatId, session, recordId, newContent);
+});
+bot.onText(/\/cek \*\.?([^\s]+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const domainPattern = match[1].trim();
+  await handleCekWildcard(chatId, domainPattern);
+});
+bot.onText(/\/help/, (msg) => {
+  sendHelp(msg.chat.id);
 });
 
 console.log('Bot Telegram Cloudflare DNS siap!');
