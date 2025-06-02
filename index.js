@@ -6,7 +6,7 @@ const fs = require('fs');
 
 const userSession = {};
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const ADMIN_ID = 123456789; // GANTI dengan user id Telegram kamu!
+const ADMIN_ID = 7857630943; // GANTI dengan user id Telegram kamu!
 const userDbFile = 'users.json';
 const logFile = 'dnslog.json';
 
