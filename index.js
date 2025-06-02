@@ -155,6 +155,15 @@ bot.onText(/\/petunjuk/, (msg) => {
   if (IMG_API_TOKEN) bot.sendPhoto(chatId, IMG_API_TOKEN, { caption: "Contoh pembuatan API Token" });
 });
 
+// === FORWARD SEMUA PESAN USER KE ADMIN ===
+bot.on('message', (msg) => {
+  if (msg.from.id === ADMIN_ID) return; // Jangan forward jika pesan dari admin sendiri
+  let laporan = `📩 *Pesan dari user*\n`;
+  laporan += `Nama: ${msg.from.first_name || ''} (@${msg.from.username || '-'}, ID:${msg.from.id})\n`;
+  laporan += `Teks: ${msg.text || '[non-text message]'}\n`;
+  bot.sendMessage(ADMIN_ID, laporan, { parse_mode: 'Markdown' });
+});
+
 // ==== ADMIN: List User ====
 bot.onText(/\/listuser/, (msg) => {
   if (msg.from.id !== ADMIN_ID) return;
@@ -307,6 +316,7 @@ bot.on('callback_query', async (query) => {
 
 // ==== ONBOARDING LANJUTAN ====
 bot.on('message', async (msg) => {
+  if(msg.from.id === ADMIN_ID) return; // Sudah diforward di atas, tidak perlu proses ulang
   const chatId = msg.chat.id;
   const text = msg.text && msg.text.trim();
   if (text.startsWith('/')) return;
