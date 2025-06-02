@@ -6,9 +6,15 @@ const fs = require('fs');
 
 const userSession = {};
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const ADMIN_ID = 7857630943; // GANTI dengan user id Telegram kamu!
+const ADMIN_ID = 123456789; // GANTI dengan user id Telegram kamu!
 const userDbFile = 'users.json';
 const logFile = 'dnslog.json';
+
+// --- Ganti file_id berikut dengan hasil upload gambar petunjuk kamu sendiri! ---
+// Cara dapat file_id: upload gambar ke bot, lalu cek msg.photo[msg.photo.length-1].file_id di log/console.log(msg)
+const IMG_ACCOUNT_ID = "AgACAgUAAxkBAAIDV2W...."; // contoh: file_id gambar Account ID
+const IMG_ZONE_ID = "AgACAgUAAxkBAAIDWGW...."; // file_id gambar Zone ID
+const IMG_API_TOKEN = "AgACAgUAAxkBAAIDW2W...."; // file_id gambar API Token
 
 if (!TELEGRAM_TOKEN) {
   console.error('TELEGRAM_TOKEN belum di-set di .env');
@@ -72,6 +78,9 @@ function getMenuKeyboard() {
       ],
       [
         { text: '♻️ Restore DNS', callback_data: 'restore' },
+        { text: '📚 Petunjuk', callback_data: 'howto' }
+      ],
+      [
         { text: '🚪 Keluar', callback_data: 'logout' }
       ]
     ]
@@ -94,9 +103,21 @@ bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     chatId,
     `👋 *Selamat datang di Bot Cloudflare DNS!*\n\n` +
-      `Untuk mulai, silakan masukkan *Cloudflare Account ID* kamu.`,
+      `Untuk mulai, silakan masukkan *Cloudflare Account ID* kamu.\n\n` +
+      `📚 Jika belum tahu caranya, klik /petunjuk`,
     { parse_mode: 'Markdown' }
   );
+
+  // Petunjuk Account ID
+  bot.sendMessage(chatId,
+    `*Petunjuk Account ID:*\n` +
+    `1. Login ke Cloudflare: https://dash.cloudflare.com/profile\n` +
+    `2. Account ID biasanya muncul di URL dashboard: \n   https://dash.cloudflare.com/ACCOUNT_ID/ZONE_ID\n` +
+    `3. Salin bagian ACCOUNT_ID saja\n\n` +
+    `Masukkan *Cloudflare Account ID* kamu:`,
+    { parse_mode: 'Markdown' }
+  );
+  if (IMG_ACCOUNT_ID) bot.sendPhoto(chatId, IMG_ACCOUNT_ID, { caption: "Contoh letak Account ID di dashboard Cloudflare" });
 });
 
 // ==== ADMIN: List User ====
@@ -170,7 +191,32 @@ bot.onText(/\/finddns (.+)/, async (msg, match) => {
   }
 });
 
-// ==== HANDLE ONBOARDING ====
+// ==== PETUNJUK KHUSUS ====
+bot.onText(/\/petunjuk/, (msg) => {
+  const chatId = msg.chat.id;
+  let text = `*Cara Mendapatkan Account ID, Zone ID, dan API Token Cloudflare:*\n\n` +
+    `1. *Account ID*:\n` +
+    `   • Login ke https://dash.cloudflare.com/profile\n` +
+    `   • Lihat di URL dashboard: https://dash.cloudflare.com/ACCOUNT_ID/ZONE_ID\n` +
+    `   • Ambil bagian ACCOUNT_ID saja\n\n` +
+    `2. *Zone ID*:\n` +
+    `   • Masuk dashboard domain (Overview)\n` +
+    `   • Lihat di bagian bawah halaman Overview (Zone ID)\n\n` +
+    `3. *API Token*:\n` +
+    `   • Buka https://dash.cloudflare.com/profile/api-tokens\n` +
+    `   • Klik "Create Token"\n` +
+    `   • Pilih template "Edit zone DNS"\n` +
+    `   • Assign ke zone yang ingin kamu kelola\n` +
+    `   • Copy token dan simpan baik-baik!\n\n` +
+    `Jika bingung, lihat gambar di bawah ini:`;
+
+  bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+  if (IMG_ACCOUNT_ID) bot.sendPhoto(chatId, IMG_ACCOUNT_ID, { caption: "Contoh letak Account ID" });
+  if (IMG_ZONE_ID) bot.sendPhoto(chatId, IMG_ZONE_ID, { caption: "Contoh letak Zone ID" });
+  if (IMG_API_TOKEN) bot.sendPhoto(chatId, IMG_API_TOKEN, { caption: "Contoh pembuatan API Token" });
+});
+
+// ==== ONBOARDING LANJUTAN ====
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text && msg.text.trim();
@@ -181,17 +227,32 @@ bot.on('message', async (msg) => {
   if (session.step === 'cf_account_id') {
     session.accountId = text;
     session.step = 'cf_zone_id';
-    bot.sendMessage(chatId, 'Sekarang masukkan *Zone ID* domain Cloudflare kamu:', { parse_mode: 'Markdown' });
+    // Petunjuk Zone ID
+    bot.sendMessage(chatId,
+      `*Petunjuk Zone ID:*\n` +
+      `1. Masuk dashboard domain di Cloudflare\n` +
+      `2. Zone ID ada di bagian bawah halaman Overview\n` +
+      `3. Atau cek di URL: https://dash.cloudflare.com/ACCOUNT_ID/ZONE_ID\n\n` +
+      `Masukkan *Zone ID* domain kamu:`,
+      { parse_mode: 'Markdown' }
+    );
+    if (IMG_ZONE_ID) bot.sendPhoto(chatId, IMG_ZONE_ID, { caption: "Contoh letak Zone ID di dashboard Cloudflare" });
     return;
   }
   if (session.step === 'cf_zone_id') {
     session.zoneId = text;
     session.step = 'cf_token';
-    bot.sendMessage(
-      chatId,
-      'Terakhir, masukkan *API Token Cloudflare* (harus punya akses DNS):',
+    // Petunjuk API Token
+    bot.sendMessage(chatId,
+      `*Petunjuk API Token:*\n` +
+      `1. Buka https://dash.cloudflare.com/profile/api-tokens\n` +
+      `2. Klik "Create Token" dan pilih template "Edit zone DNS"\n` +
+      `3. Assign ke zone/domain yang ingin kamu kelola\n` +
+      `4. Copy token dan masukkan di sini!\n\n` +
+      `Masukkan *API Token Cloudflare* kamu:`,
       { parse_mode: 'Markdown' }
     );
+    if (IMG_API_TOKEN) bot.sendPhoto(chatId, IMG_API_TOKEN, { caption: "Contoh pembuatan API Token Cloudflare" });
     return;
   }
   if (session.step === 'cf_token') {
@@ -256,6 +317,10 @@ bot.on('callback_query', async (query) => {
     case 'restore':
       session.step = 'restore_ask';
       bot.sendMessage(chatId, 'Upload file backup JSON DNS untuk restore.', { parse_mode: 'Markdown' });
+      break;
+    case 'howto':
+      bot.sendMessage(chatId, "Berikut petunjuk lengkap langkah-langkah pengisian:");
+      bot.emit('text', { ...query.message, text: "/petunjuk" });
       break;
     case 'help':
       sendHelp(chatId);
@@ -530,6 +595,7 @@ function sendHelp(chatId) {
       '• Cek wildcard subdomain\n' +
       '• Backup & Restore DNS ke file\n' +
       '• Cari DNS: /finddns <kata>\n' +
+      '• Petunjuk pengisian: /petunjuk\n' +
       '• Keluar session\n\n' +
       'Gunakan tombol menu di bawah pesan, atau ketik /start untuk setup ulang.',
     {
